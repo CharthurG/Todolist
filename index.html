@@ -109,20 +109,39 @@
   /* ---------- Task rows ---------- */
   .task{
     background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
-    padding:9px 10px; margin-bottom:8px; cursor:grab;
+    padding:9px 10px; margin-bottom:8px;
     display:flex; align-items:flex-start; gap:8px;
   }
-  .task.dragging{ opacity:.4; }
   .task .task-body{ flex:1; min-width:0; }
   .task .task-text{ font-size:14px; word-break:break-word; }
   .task .task-meta{ font-size:11.5px; color:var(--ink-soft); margin-top:2px; }
   .task .task-meta.overdue{ color:var(--danger); }
-  .task-actions{ display:flex; gap:4px; flex-shrink:0; }
+  .task-actions{ display:flex; align-items:center; gap:4px; flex-shrink:0; }
   .icon-btn{
     background:none; border:none; color:var(--ink-soft); font-size:14px; padding:2px 4px; border-radius:2px;
   }
   .icon-btn:hover{ background:var(--paper); color:var(--ink); }
   .master-drop.dragover{ outline:2px dashed var(--navy); outline-offset:4px; }
+
+  /* draggable row content — shared by master rows and filled urgent slots */
+  .task-inner{
+    display:flex; flex:1; min-width:0; align-items:flex-start; gap:8px;
+    border-left:4px solid transparent; padding-left:6px; margin-left:-2px;
+    cursor:grab;
+  }
+  .task-inner.dragging{ opacity:.4; }
+  .task-inner.flag-important{ border-left-color:#E0B400; }
+  .task-inner.flag-urgent{ border-left-color:var(--danger); }
+  .task-inner.flag-both{ border-left-color:#D9711B; }
+  .task-inner.drop-before{ box-shadow: inset 0 3px 0 var(--navy); }
+  .task-inner.drop-after{ box-shadow: inset 0 -3px 0 var(--navy); }
+
+  .flag-btn{
+    width:15px; height:15px; border-radius:50%; border:1px solid var(--border);
+    background:var(--surface); padding:0; flex-shrink:0;
+  }
+  .flag-btn.important.active{ background:#E0B400; border-color:#E0B400; }
+  .flag-btn.urgent.active{ background:var(--danger); border-color:var(--danger); }
 
   .add-row{ display:flex; gap:6px; margin-top:12px; }
   .add-row input{ flex:1; padding:8px 9px; border:1px solid var(--border); border-radius:var(--radius); }
@@ -417,13 +436,34 @@ async function saveDataToGithub(data){
    ========================================================================= */
 let state = {
   config: { passwordHash: null },
-  tasks: [],       // {id, text, list:'master'|'urgent', status:'active'|'completed', dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
+  tasks: [],       // {id, text, list:'master'|'urgent', status:'active'|'completed', order, flagImportant, flagUrgent, dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
   recurring: [],   // {id, text, type:'interval'|'weekdays', intervalDays, weekdays:[], nextDue, addToUrgent}
   scheduled: []    // {id, text, triggerDate, addToUrgent}
 };
 
 function uid(){ return crypto.randomUUID(); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
+
+// Position a task at the end of the given list ('master' or 'urgent').
+function appendOrder(list){
+  const items = state.tasks.filter(t=>t.status==='active' && t.list===list);
+  if(items.length === 0) return 0;
+  return Math.max(...items.map(t=> typeof t.order === 'number' ? t.order : 0)) + 1;
+}
+
+// Backfill order/flag fields on tasks saved before this feature existed.
+function migrateTasks(){
+  ['master','urgent'].forEach(list=>{
+    const items = state.tasks
+      .filter(t=>t.status==='active' && t.list===list)
+      .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
+    items.forEach((t,i)=>{ t.order = i; });
+  });
+  state.tasks.forEach(t=>{
+    if(typeof t.flagImportant !== 'boolean') t.flagImportant = false;
+    if(typeof t.flagUrgent !== 'boolean') t.flagUrgent = false;
+  });
+}
 
 /* =========================================================================
    PASSWORD (hash stored inside the synced data file, so it works everywhere)
@@ -496,6 +536,7 @@ async function boot(){
     if(remote){
       state = Object.assign({config:{passwordHash:null}, tasks:[], recurring:[], scheduled:[]}, remote);
     }
+    migrateTasks();
     setStatus('Synced');
   } catch(e){
     setStatus('Load error — check console', true);
@@ -572,9 +613,11 @@ function processDueItems(){
   // Scheduled one-offs
   state.scheduled = state.scheduled.filter(s=>{
     if(s.triggerDate <= today){
+      const targetList = s.addToUrgent ? 'urgent' : 'master';
       state.tasks.push({
-        id: uid(), text: s.text, list: s.addToUrgent ? 'urgent' : 'master',
-        status:'active', dueDate: s.triggerDate, completedDate:null,
+        id: uid(), text: s.text, list: targetList,
+        status:'active', order: appendOrder(targetList), flagImportant:false, flagUrgent:false,
+        dueDate: s.triggerDate, completedDate:null,
         source:'scheduled', sourceId:s.id
       });
       changed = true;
@@ -587,9 +630,11 @@ function processDueItems(){
   state.recurring.forEach(r=>{
     let guard = 0;
     while(r.nextDue <= today && guard < 60){
+      const targetList = r.addToUrgent ? 'urgent' : 'master';
       state.tasks.push({
-        id: uid(), text: r.text, list: r.addToUrgent ? 'urgent' : 'master',
-        status:'active', dueDate: r.nextDue, completedDate:null,
+        id: uid(), text: r.text, list: targetList,
+        status:'active', order: appendOrder(targetList), flagImportant:false, flagUrgent:false,
+        dueDate: r.nextDue, completedDate:null,
         source:'recurring', sourceId:r.id
       });
       if(r.type === 'interval'){
@@ -603,9 +648,11 @@ function processDueItems(){
   });
 
   // Enforce urgent cap of 6 — overflow spills back to master
-  const urgentTasks = state.tasks.filter(t=>t.list==='urgent' && t.status==='active');
+  const urgentTasks = state.tasks
+    .filter(t=>t.list==='urgent' && t.status==='active')
+    .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
   if(urgentTasks.length > 6){
-    urgentTasks.slice(6).forEach(t=>t.list='master');
+    urgentTasks.slice(6).forEach(t=>{ t.list='master'; t.order = appendOrder('master'); });
     changed = true;
   }
 
@@ -626,7 +673,8 @@ function renderAll(){
 function activeTasks(){ return state.tasks.filter(t=>t.status==='active'); }
 
 function renderUrgent(){
-  const urgent = activeTasks().filter(t=>t.list==='urgent');
+  const urgent = activeTasks().filter(t=>t.list==='urgent')
+    .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
   document.getElementById('urgentCount').textContent = `${urgent.length} / 6`;
   const container = document.getElementById('urgentSlots');
   container.innerHTML = '';
@@ -640,14 +688,17 @@ function renderUrgent(){
       e.preventDefault();
       slot.classList.remove('dragover');
       const id = e.dataTransfer.getData('text/plain');
-      moveToUrgent(id);
+      if(t && id === t.id) return;
+      // Fallback for drops that land on the slot padding rather than the row itself —
+      // precise before/after placement is handled by the row's own drop handler below.
+      reorderOrMove(id, 'urgent', t ? t.id : null, false);
     };
     const num = document.createElement('div');
     num.className = 'slot-num';
     num.textContent = i+1;
     slot.appendChild(num);
     if(t){
-      slot.appendChild(taskBody(t));
+      slot.appendChild(taskBody(t, 'urgent'));
     } else {
       const empty = document.createElement('div');
       empty.className = 'empty-label';
@@ -659,30 +710,60 @@ function renderUrgent(){
 }
 
 function renderMaster(){
-  const master = activeTasks().filter(t=>t.list==='master');
+  const master = activeTasks().filter(t=>t.list==='master')
+    .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
   document.getElementById('masterCount').textContent = master.length;
   const container = document.getElementById('masterList');
   container.innerHTML = '';
   if(master.length === 0){
     container.innerHTML = '<div class="empty-note">Nothing here. Add a task below.</div>';
   }
-  master.sort((a,b)=> (a.dueDate||'9999').localeCompare(b.dueDate||'9999'));
   master.forEach(t=>{
     const el = document.createElement('div');
     el.className = 'task';
-    el.draggable = true;
-    el.ondragstart = (e)=>{ e.dataTransfer.setData('text/plain', t.id); el.classList.add('dragging'); };
-    el.ondragend = ()=> el.classList.remove('dragging');
-    el.appendChild(taskBody(t));
+    el.appendChild(taskBody(t, 'master'));
     container.appendChild(el);
   });
 }
 
-function taskBody(t){
+function flagClassName(t){
+  if(t.flagImportant && t.flagUrgent) return 'flag-both';
+  if(t.flagImportant) return 'flag-important';
+  if(t.flagUrgent) return 'flag-urgent';
+  return '';
+}
+
+// listContext is 'master' or 'urgent' — which list this row currently lives in,
+// used so a drop directly on this row knows where to insert the dragged task.
+function taskBody(t, listContext){
   const wrap = document.createElement('div');
-  wrap.style.display='flex'; wrap.style.flex='1'; wrap.style.alignItems='flex-start'; wrap.style.gap='8px';
+  wrap.className = ('task-inner ' + flagClassName(t)).trim();
   wrap.draggable = true;
-  wrap.ondragstart = (e)=>{ e.dataTransfer.setData('text/plain', t.id); };
+
+  wrap.ondragstart = (e)=>{
+    e.dataTransfer.setData('text/plain', t.id);
+    e.stopPropagation();
+    wrap.classList.add('dragging');
+  };
+  wrap.ondragend = ()=> wrap.classList.remove('dragging');
+  wrap.ondragover = (e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = wrap.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    wrap.classList.toggle('drop-before', before);
+    wrap.classList.toggle('drop-after', !before);
+  };
+  wrap.ondragleave = ()=> wrap.classList.remove('drop-before','drop-after');
+  wrap.ondrop = (e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    const before = wrap.classList.contains('drop-before');
+    wrap.classList.remove('drop-before','drop-after');
+    const draggedId = e.dataTransfer.getData('text/plain');
+    if(draggedId === t.id) return;
+    reorderOrMove(draggedId, listContext, t.id, !before);
+  };
 
   const body = document.createElement('div');
   body.className = 'task-body';
@@ -701,16 +782,39 @@ function taskBody(t){
 
   const actions = document.createElement('div');
   actions.className = 'task-actions';
+
+  const impBtn = document.createElement('button');
+  impBtn.className = 'flag-btn important' + (t.flagImportant ? ' active' : '');
+  impBtn.title = 'Toggle important (yellow)';
+  impBtn.onclick = (e)=>{ e.stopPropagation(); toggleFlag(t.id, 'flagImportant'); };
+
+  const urgBtn = document.createElement('button');
+  urgBtn.className = 'flag-btn urgent' + (t.flagUrgent ? ' active' : '');
+  urgBtn.title = 'Toggle urgent (red)';
+  urgBtn.onclick = (e)=>{ e.stopPropagation(); toggleFlag(t.id, 'flagUrgent'); };
+
   const doneBtn = document.createElement('button');
   doneBtn.className = 'icon-btn'; doneBtn.title = 'Mark complete'; doneBtn.textContent = '✓';
-  doneBtn.onclick = ()=> completeTask(t.id);
+  doneBtn.onclick = (e)=>{ e.stopPropagation(); completeTask(t.id); };
+
   const delBtn = document.createElement('button');
   delBtn.className = 'icon-btn'; delBtn.title = 'Delete'; delBtn.textContent = '✕';
-  delBtn.onclick = ()=> deleteTask(t.id);
+  delBtn.onclick = (e)=>{ e.stopPropagation(); deleteTask(t.id); };
+
+  actions.appendChild(impBtn);
+  actions.appendChild(urgBtn);
   actions.appendChild(doneBtn);
   actions.appendChild(delBtn);
   wrap.appendChild(actions);
   return wrap;
+}
+
+function toggleFlag(id, field){
+  const t = state.tasks.find(t=>t.id===id);
+  if(!t) return;
+  t[field] = !t[field];
+  renderAll();
+  persist();
 }
 
 function renderRecurring(){
@@ -791,7 +895,11 @@ function addMasterTask(){
   const input = document.getElementById('newTaskInput');
   const text = input.value.trim();
   if(!text) return;
-  state.tasks.push({ id: uid(), text, list:'master', status:'active', dueDate:null, completedDate:null, source:'manual', sourceId:null });
+  state.tasks.push({
+    id: uid(), text, list:'master', status:'active',
+    order: appendOrder('master'), flagImportant:false, flagUrgent:false,
+    dueDate:null, completedDate:null, source:'manual', sourceId:null
+  });
   input.value = '';
   renderAll();
   persist();
@@ -812,15 +920,31 @@ function deleteTask(id){
   persist();
 }
 
-function moveToUrgent(id){
-  const currentUrgent = activeTasks().filter(t=>t.list==='urgent');
-  const t = state.tasks.find(t=>t.id===id);
-  if(!t) return;
-  if(t.list !== 'urgent' && currentUrgent.length >= 6){
-    alert('Urgent six is full. Move something back to the master list first.');
-    return;
+// Moves a task into targetList and positions it relative to beforeId (or appends
+// to the end if beforeId is null). Used by every drop target — column background,
+// urgent slots, and row-level before/after drops all funnel through here so
+// ordering stays consistent everywhere.
+function reorderOrMove(draggedId, targetList, beforeId, insertAfter){
+  const dragged = state.tasks.find(t=>t.id===draggedId && t.status==='active');
+  if(!dragged) return;
+  if(targetList === 'urgent' && dragged.list !== 'urgent'){
+    const urgentCount = activeTasks().filter(t=>t.list==='urgent').length;
+    if(urgentCount >= 6){
+      alert('Urgent six is full. Move something back to the master list first.');
+      return;
+    }
   }
-  t.list = 'urgent';
+  dragged.list = targetList;
+  const siblings = activeTasks()
+    .filter(t=> t.list===targetList && t.id!==dragged.id)
+    .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
+  let insertIndex = siblings.length;
+  if(beforeId){
+    const idx = siblings.findIndex(s=>s.id===beforeId);
+    if(idx !== -1) insertIndex = insertAfter ? idx + 1 : idx;
+  }
+  siblings.splice(insertIndex, 0, dragged);
+  siblings.forEach((s,i)=>{ s.order = i; });
   renderAll();
   persist();
 }
@@ -831,8 +955,7 @@ function dropOnMaster(e){
   e.preventDefault();
   document.getElementById('masterCol').classList.remove('dragover');
   const id = e.dataTransfer.getData('text/plain');
-  const t = state.tasks.find(t=>t.id===id);
-  if(t){ t.list = 'master'; renderAll(); persist(); }
+  reorderOrMove(id, 'master', null, false);
 }
 
 /* =========================================================================
