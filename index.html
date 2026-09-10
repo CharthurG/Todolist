@@ -130,18 +130,8 @@
     cursor:grab;
   }
   .task-inner.dragging{ opacity:.4; }
-  .task-inner.flag-important{ border-left-color:#E0B400; }
-  .task-inner.flag-urgent{ border-left-color:var(--danger); }
-  .task-inner.flag-both{ border-left-color:#D9711B; }
   .task-inner.drop-before{ box-shadow: inset 0 3px 0 var(--navy); }
   .task-inner.drop-after{ box-shadow: inset 0 -3px 0 var(--navy); }
-
-  .flag-btn{
-    width:15px; height:15px; border-radius:50%; border:1px solid var(--border);
-    background:var(--surface); padding:0; flex-shrink:0;
-  }
-  .flag-btn.important.active{ background:#E0B400; border-color:#E0B400; }
-  .flag-btn.urgent.active{ background:var(--danger); border-color:var(--danger); }
 
   .add-row{ display:flex; gap:6px; margin-top:12px; }
   .add-row input{ flex:1; padding:8px 9px; border:1px solid var(--border); border-radius:var(--radius); }
@@ -436,7 +426,7 @@ async function saveDataToGithub(data){
    ========================================================================= */
 let state = {
   config: { passwordHash: null },
-  tasks: [],       // {id, text, list:'master'|'urgent', status:'active'|'completed', order, flagImportant, flagUrgent, dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
+  tasks: [],       // {id, text, list:'master'|'urgent', status:'active'|'completed', order, dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
   recurring: [],   // {id, text, type:'interval'|'weekdays', intervalDays, weekdays:[], nextDue, addToUrgent}
   scheduled: []    // {id, text, triggerDate, addToUrgent}
 };
@@ -451,17 +441,13 @@ function appendOrder(list){
   return Math.max(...items.map(t=> typeof t.order === 'number' ? t.order : 0)) + 1;
 }
 
-// Backfill order/flag fields on tasks saved before this feature existed.
+// Backfill order on tasks saved before manual ordering existed.
 function migrateTasks(){
   ['master','urgent'].forEach(list=>{
     const items = state.tasks
       .filter(t=>t.status==='active' && t.list===list)
       .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
     items.forEach((t,i)=>{ t.order = i; });
-  });
-  state.tasks.forEach(t=>{
-    if(typeof t.flagImportant !== 'boolean') t.flagImportant = false;
-    if(typeof t.flagUrgent !== 'boolean') t.flagUrgent = false;
   });
 }
 
@@ -616,7 +602,7 @@ function processDueItems(){
       const targetList = s.addToUrgent ? 'urgent' : 'master';
       state.tasks.push({
         id: uid(), text: s.text, list: targetList,
-        status:'active', order: appendOrder(targetList), flagImportant:false, flagUrgent:false,
+        status:'active', order: appendOrder(targetList),
         dueDate: s.triggerDate, completedDate:null,
         source:'scheduled', sourceId:s.id
       });
@@ -633,7 +619,7 @@ function processDueItems(){
       const targetList = r.addToUrgent ? 'urgent' : 'master';
       state.tasks.push({
         id: uid(), text: r.text, list: targetList,
-        status:'active', order: appendOrder(targetList), flagImportant:false, flagUrgent:false,
+        status:'active', order: appendOrder(targetList),
         dueDate: r.nextDue, completedDate:null,
         source:'recurring', sourceId:r.id
       });
@@ -726,18 +712,11 @@ function renderMaster(){
   });
 }
 
-function flagClassName(t){
-  if(t.flagImportant && t.flagUrgent) return 'flag-both';
-  if(t.flagImportant) return 'flag-important';
-  if(t.flagUrgent) return 'flag-urgent';
-  return '';
-}
-
 // listContext is 'master' or 'urgent' — which list this row currently lives in,
 // used so a drop directly on this row knows where to insert the dragged task.
 function taskBody(t, listContext){
   const wrap = document.createElement('div');
-  wrap.className = ('task-inner ' + flagClassName(t)).trim();
+  wrap.className = 'task-inner';
   wrap.draggable = true;
 
   wrap.ondragstart = (e)=>{
@@ -783,16 +762,6 @@ function taskBody(t, listContext){
   const actions = document.createElement('div');
   actions.className = 'task-actions';
 
-  const impBtn = document.createElement('button');
-  impBtn.className = 'flag-btn important' + (t.flagImportant ? ' active' : '');
-  impBtn.title = 'Toggle important (yellow)';
-  impBtn.onclick = (e)=>{ e.stopPropagation(); toggleFlag(t.id, 'flagImportant'); };
-
-  const urgBtn = document.createElement('button');
-  urgBtn.className = 'flag-btn urgent' + (t.flagUrgent ? ' active' : '');
-  urgBtn.title = 'Toggle urgent (red)';
-  urgBtn.onclick = (e)=>{ e.stopPropagation(); toggleFlag(t.id, 'flagUrgent'); };
-
   const doneBtn = document.createElement('button');
   doneBtn.className = 'icon-btn'; doneBtn.title = 'Mark complete'; doneBtn.textContent = '✓';
   doneBtn.onclick = (e)=>{ e.stopPropagation(); completeTask(t.id); };
@@ -801,20 +770,10 @@ function taskBody(t, listContext){
   delBtn.className = 'icon-btn'; delBtn.title = 'Delete'; delBtn.textContent = '✕';
   delBtn.onclick = (e)=>{ e.stopPropagation(); deleteTask(t.id); };
 
-  actions.appendChild(impBtn);
-  actions.appendChild(urgBtn);
   actions.appendChild(doneBtn);
   actions.appendChild(delBtn);
   wrap.appendChild(actions);
   return wrap;
-}
-
-function toggleFlag(id, field){
-  const t = state.tasks.find(t=>t.id===id);
-  if(!t) return;
-  t[field] = !t[field];
-  renderAll();
-  persist();
 }
 
 function renderRecurring(){
@@ -897,7 +856,7 @@ function addMasterTask(){
   if(!text) return;
   state.tasks.push({
     id: uid(), text, list:'master', status:'active',
-    order: appendOrder('master'), flagImportant:false, flagUrgent:false,
+    order: appendOrder('master'),
     dueDate:null, completedDate:null, source:'manual', sourceId:null
   });
   input.value = '';
