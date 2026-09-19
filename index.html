@@ -20,6 +20,12 @@
     --danger: #A3402F;
     --radius: 3px;
   }
+  /* Home space: light blue paper, everything else identical */
+  body.space-home{
+    --paper: #E2EEF8;
+    --border: #B9CEE1;
+    --navy-soft: #cfe0ee;
+  }
   *{box-sizing:border-box;}
   body{
     margin:0;
@@ -28,6 +34,7 @@
     font-family:'Inter',sans-serif;
     font-size:15px;
     line-height:1.5;
+    transition:background-color .2s;
   }
   h1,h2,h3{ font-family:'Lora',serif; font-weight:600; margin:0; }
   button{ font-family:inherit; cursor:pointer; }
@@ -73,17 +80,31 @@
     display:flex; align-items:center; justify-content:space-between;
     padding:16px 28px; border-bottom:1px solid var(--border); background:var(--surface);
   }
+  body.space-home header.top{ background:#F0F7FC; }
   header.top h1{ font-size:19px; }
   header.top .status{ font-size:12px; color:var(--ink-soft); }
   header.top .status.saving{ color:var(--brass); }
   header.top .status.error{ color:var(--danger); }
+  .top-left{ display:flex; align-items:center; gap:22px; }
   .top-actions{ display:flex; align-items:center; gap:14px; }
+
+  /* Work / Home switcher */
+  .space-switch{
+    display:flex; gap:2px; padding:3px;
+    border:1px solid var(--border); border-radius:var(--radius); background:var(--paper);
+  }
+  .space-btn{
+    padding:5px 18px; border:none; border-radius:2px; background:transparent;
+    color:var(--ink-soft); font-size:13.5px; font-weight:500;
+  }
+  .space-btn:hover{ color:var(--ink); }
+  .space-btn.active{ background:var(--navy); color:#fff; }
 
   main.layout{
     display:grid;
     grid-template-columns: 280px 1fr 340px;
     gap:0;
-    min-height:calc(100vh - 58px);
+    min-height:calc(100vh - 62px);
   }
   section.col{ padding:22px; border-right:1px solid var(--border); overflow-y:auto; }
   section.col:last-child{ border-right:none; }
@@ -133,6 +154,12 @@
   .task-inner.drop-before{ box-shadow: inset 0 3px 0 var(--navy); }
   .task-inner.drop-after{ box-shadow: inset 0 -3px 0 var(--navy); }
 
+  /* inline rename (double-click a task) */
+  .rename-input{
+    width:100%; padding:3px 6px; font-size:14px;
+    border:1px solid var(--navy); border-radius:var(--radius); background:var(--surface);
+  }
+
   .add-row{ display:flex; gap:6px; margin-top:12px; }
   .add-row input{ flex:1; padding:8px 9px; border:1px solid var(--border); border-radius:var(--radius); }
 
@@ -150,6 +177,13 @@
   .mini-item .mini-title{ font-weight:500; }
   .mini-item .mini-sub{ font-size:11.5px; color:var(--ink-soft); margin-top:2px; }
   .mini-item .mini-actions{ margin-top:6px; display:flex; gap:6px; }
+
+  /* recurring-task edit form (lives inside a .mini-item) */
+  .edit-form .field{ margin-bottom:10px; }
+  .edit-form select{
+    width:100%; padding:8px 9px; border:1px solid var(--border); border-radius:var(--radius);
+    background:var(--paper);
+  }
 
   .form-block{ border:1px solid var(--border); border-radius:var(--radius); padding:12px; margin-bottom:16px; background:var(--surface); }
   .form-block h3{ font-size:13px; margin-bottom:10px; }
@@ -224,7 +258,13 @@
 <!-- ===================== MAIN APP ===================== -->
 <div id="app">
   <header class="top">
-    <h1>Ledger</h1>
+    <div class="top-left">
+      <h1>Ledger</h1>
+      <nav class="space-switch" aria-label="Switch between Work and Home lists">
+        <button class="space-btn active" data-space="work" onclick="switchSpace('work')">Work</button>
+        <button class="space-btn" data-space="home" onclick="switchSpace('home')">Home</button>
+      </nav>
+    </div>
     <div class="top-actions">
       <span class="status" id="statusLine">Synced</span>
       <button class="btn secondary small" onclick="resetDeviceConfig()">Disconnect device</button>
@@ -424,31 +464,77 @@ async function saveDataToGithub(data){
 /* =========================================================================
    STATE
    ========================================================================= */
+// Everything lives in one data file. Each task / recurring / scheduled item carries
+// a `space` ('work' | 'home'). Items saved before spaces existed have no `space`
+// and are treated as 'work'.
 let state = {
   config: { passwordHash: null },
-  tasks: [],       // {id, text, list:'master'|'urgent', status:'active'|'completed', order, dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
-  recurring: [],   // {id, text, type:'interval'|'weekdays', intervalDays, weekdays:[], nextDue, addToUrgent}
-  scheduled: []    // {id, text, triggerDate, addToUrgent}
+  tasks: [],       // {id, space, text, list:'master'|'urgent', status:'active'|'completed', order, dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
+  recurring: [],   // {id, space, text, type:'interval'|'weekdays', intervalDays, weekdays:[], nextDue, addToUrgent}
+  scheduled: []    // {id, space, text, triggerDate, addToUrgent}
 };
+
+const SPACES = ['work','home'];
+const SPACE_KEY = 'ledger_space';   // which tab this device last viewed (per-browser, not synced)
+let currentSpace = 'work';
 
 function uid(){ return crypto.randomUUID(); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 
-// Position a task at the end of the given list ('master' or 'urgent').
-function appendOrder(list){
-  const items = state.tasks.filter(t=>t.status==='active' && t.list===list);
+function spaceOf(item){ return item.space || 'work'; }
+function inSpace(item){ return spaceOf(item) === currentSpace; }
+
+// Position a task at the end of the given list ('master' or 'urgent') within a space.
+function appendOrder(list, space){
+  space = space || currentSpace;
+  const items = state.tasks.filter(t=>t.status==='active' && t.list===list && spaceOf(t)===space);
   if(items.length === 0) return 0;
   return Math.max(...items.map(t=> typeof t.order === 'number' ? t.order : 0)) + 1;
 }
 
-// Backfill order on tasks saved before manual ordering existed.
+// Backfill `space` on data saved before Work/Home existed, then backfill order
+// on tasks saved before manual ordering existed.
 function migrateTasks(){
-  ['master','urgent'].forEach(list=>{
-    const items = state.tasks
-      .filter(t=>t.status==='active' && t.list===list)
-      .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
-    items.forEach((t,i)=>{ t.order = i; });
+  state.tasks.forEach(t=>{ if(!t.space) t.space = 'work'; });
+  state.recurring.forEach(r=>{ if(!r.space) r.space = 'work'; });
+  state.scheduled.forEach(s=>{ if(!s.space) s.space = 'work'; });
+
+  SPACES.forEach(space=>{
+    ['master','urgent'].forEach(list=>{
+      const items = state.tasks
+        .filter(t=>t.status==='active' && t.list===list && spaceOf(t)===space)
+        .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
+      items.forEach((t,i)=>{ t.order = i; });
+    });
   });
+}
+
+/* =========================================================================
+   WORK / HOME SPACES
+   ========================================================================= */
+function loadSpacePref(){
+  try{
+    const v = localStorage.getItem(SPACE_KEY);
+    if(SPACES.includes(v)) currentSpace = v;
+  } catch(e){}
+}
+
+function applySpaceUI(){
+  document.body.classList.toggle('space-home', currentSpace === 'home');
+  document.querySelectorAll('.space-btn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.space === currentSpace);
+  });
+  document.title = 'Ledger — ' + (currentSpace === 'home' ? 'Home' : 'Work');
+}
+
+function switchSpace(name){
+  if(!SPACES.includes(name) || name === currentSpace) return;
+  currentSpace = name;
+  try{ localStorage.setItem(SPACE_KEY, name); } catch(e){}
+  editingRecurringId = null;   // discard any half-finished recurring edit
+  editingScheduledId = null;   // ...and any half-finished scheduled edit
+  applySpaceUI();
+  renderAll();
 }
 
 /* =========================================================================
@@ -503,6 +589,8 @@ async function submitPassword(){
 function enterApp(){
   document.getElementById('passwordGate').style.display = 'none';
   document.getElementById('app').style.display = 'block';
+  loadSpacePref();
+  applySpaceUI();
   processDueItems();
   renderAll();
 }
@@ -556,6 +644,7 @@ function persist(){
           try{
             const remote = await loadDataFromGithub();
             if(remote) state = Object.assign(state, remote);
+            migrateTasks();
             renderAll();
             setStatus('Reloaded — please redo your last change');
           } catch(e2){ setStatus('Sync error', true); }
@@ -577,6 +666,7 @@ function setStatus(text, isError, isSaving){
 
 /* =========================================================================
    DUE-ITEM PROCESSING (recurring + scheduled → master/urgent)
+   Runs across BOTH spaces so nothing is missed in the tab you're not viewing.
    ========================================================================= */
 function addDaysISO(iso, days){
   const d = new Date(iso + 'T00:00:00');
@@ -599,10 +689,11 @@ function processDueItems(){
   // Scheduled one-offs
   state.scheduled = state.scheduled.filter(s=>{
     if(s.triggerDate <= today){
+      const space = spaceOf(s);
       const targetList = s.addToUrgent ? 'urgent' : 'master';
       state.tasks.push({
-        id: uid(), text: s.text, list: targetList,
-        status:'active', order: appendOrder(targetList),
+        id: uid(), space, text: s.text, list: targetList,
+        status:'active', order: appendOrder(targetList, space),
         dueDate: s.triggerDate, completedDate:null,
         source:'scheduled', sourceId:s.id
       });
@@ -614,12 +705,13 @@ function processDueItems(){
 
   // Recurring definitions
   state.recurring.forEach(r=>{
+    const space = spaceOf(r);
     let guard = 0;
     while(r.nextDue <= today && guard < 60){
       const targetList = r.addToUrgent ? 'urgent' : 'master';
       state.tasks.push({
-        id: uid(), text: r.text, list: targetList,
-        status:'active', order: appendOrder(targetList),
+        id: uid(), space, text: r.text, list: targetList,
+        status:'active', order: appendOrder(targetList, space),
         dueDate: r.nextDue, completedDate:null,
         source:'recurring', sourceId:r.id
       });
@@ -633,14 +725,16 @@ function processDueItems(){
     }
   });
 
-  // Enforce urgent cap of 6 — overflow spills back to master
-  const urgentTasks = state.tasks
-    .filter(t=>t.list==='urgent' && t.status==='active')
-    .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
-  if(urgentTasks.length > 6){
-    urgentTasks.slice(6).forEach(t=>{ t.list='master'; t.order = appendOrder('master'); });
-    changed = true;
-  }
+  // Enforce urgent cap of 6 per space — overflow spills back to that space's master list
+  SPACES.forEach(space=>{
+    const urgentTasks = state.tasks
+      .filter(t=>t.list==='urgent' && t.status==='active' && spaceOf(t)===space)
+      .sort((a,b)=> (typeof a.order==='number'?a.order:9999) - (typeof b.order==='number'?b.order:9999));
+    if(urgentTasks.length > 6){
+      urgentTasks.slice(6).forEach(t=>{ t.list='master'; t.order = appendOrder('master', space); });
+      changed = true;
+    }
+  });
 
   if(changed) persist();
 }
@@ -651,12 +745,14 @@ function processDueItems(){
 function renderAll(){
   renderUrgent();
   renderMaster();
-  renderRecurring();
-  renderScheduled();
+  // Don't rebuild the recurring list while an edit form is open, or typed-in changes would be wiped.
+  if(editingRecurringId === null) renderRecurring();
+  if(editingScheduledId === null) renderScheduled();
   renderArchive();
 }
 
-function activeTasks(){ return state.tasks.filter(t=>t.status==='active'); }
+// Active tasks in the space currently being viewed.
+function activeTasks(){ return state.tasks.filter(t=>t.status==='active' && inSpace(t)); }
 
 function renderUrgent(){
   const urgent = activeTasks().filter(t=>t.list==='urgent')
@@ -712,6 +808,43 @@ function renderMaster(){
   });
 }
 
+// Double-click a task's text to rename it in place. Enter or clicking away saves,
+// Escape cancels. Dragging is switched off while editing so text can be selected.
+function startRename(t, wrap, textEl){
+  if(!wrap.draggable) return;   // already editing
+  wrap.draggable = false;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rename-input';
+  input.value = t.text;
+  textEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = (save)=>{
+    if(finished) return;
+    finished = true;
+    const newText = input.value.trim();
+    if(save && newText && newText !== t.text){
+      t.text = newText;
+      renderAll();
+      persist();
+    } else {
+      renderAll();   // restore the row unchanged
+    }
+  };
+  input.onkeydown = (e)=>{
+    e.stopPropagation();
+    if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
+    else if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
+  };
+  input.onblur = ()=> finish(true);
+  input.onclick = (e)=> e.stopPropagation();
+  input.ondblclick = (e)=> e.stopPropagation();
+}
+
 // listContext is 'master' or 'urgent' — which list this row currently lives in,
 // used so a drop directly on this row knows where to insert the dragged task.
 function taskBody(t, listContext){
@@ -749,6 +882,8 @@ function taskBody(t, listContext){
   const text = document.createElement('div');
   text.className = 'task-text';
   text.textContent = t.text;
+  text.title = 'Double-click to rename';
+  text.ondblclick = (e)=>{ e.stopPropagation(); startRename(t, wrap, text); };
   body.appendChild(text);
   if(t.dueDate){
     const meta = document.createElement('div');
@@ -776,25 +911,40 @@ function taskBody(t, listContext){
   return wrap;
 }
 
+function recurrenceLabel(r){
+  return r.type === 'interval'
+    ? `Every ${r.intervalDays} day${r.intervalDays==1?'':'s'}`
+    : `Weekly on ${r.weekdays.map(d=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d]).join(', ')}`;
+}
+
 function renderRecurring(){
   const container = document.getElementById('recurringList');
   container.innerHTML = '';
-  if(state.recurring.length === 0){
+  const items = state.recurring.filter(inSpace);
+  if(items.length === 0){
     container.innerHTML = '<div class="empty-note">No recurring tasks yet.</div>';
   }
-  state.recurring.forEach(r=>{
+  items.forEach(r=>{
     const el = document.createElement('div');
     el.className = 'mini-item';
-    const pattern = r.type === 'interval'
-      ? `Every ${r.intervalDays} day${r.intervalDays==1?'':'s'}`
-      : `Weekly on ${r.weekdays.map(d=>['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d]).join(', ')}`;
+
+    if(r.id === editingRecurringId){
+      el.appendChild(buildRecurringEditForm(r));
+      container.appendChild(el);
+      return;
+    }
+
     el.innerHTML = `<div class="mini-title">${escapeHtml(r.text)}</div>
-      <div class="mini-sub">${pattern} · next: ${r.nextDue}</div>`;
+      <div class="mini-sub">${recurrenceLabel(r)} · next: ${r.nextDue}</div>`;
     const actions = document.createElement('div');
     actions.className = 'mini-actions';
+    const edit = document.createElement('button');
+    edit.className = 'btn secondary small'; edit.textContent = 'Edit';
+    edit.onclick = ()=> startEditRecurring(r.id);
     const del = document.createElement('button');
     del.className = 'btn danger small'; del.textContent = 'Delete';
     del.onclick = ()=> deleteRecurring(r.id);
+    actions.appendChild(edit);
     actions.appendChild(del);
     el.appendChild(actions);
     container.appendChild(el);
@@ -804,20 +954,32 @@ function renderRecurring(){
 function renderScheduled(){
   const container = document.getElementById('scheduledList');
   container.innerHTML = '';
-  if(state.scheduled.length === 0){
+  const items = state.scheduled.filter(inSpace)
+    .sort((a,b)=>a.triggerDate.localeCompare(b.triggerDate));
+  if(items.length === 0){
     container.innerHTML = '<div class="empty-note">No scheduled tasks yet.</div>';
   }
-  state.scheduled.sort((a,b)=>a.triggerDate.localeCompare(b.triggerDate));
-  state.scheduled.forEach(s=>{
+  items.forEach(s=>{
     const el = document.createElement('div');
     el.className = 'mini-item';
+
+    if(s.id === editingScheduledId){
+      el.appendChild(buildScheduledEditForm(s));
+      container.appendChild(el);
+      return;
+    }
+
     el.innerHTML = `<div class="mini-title">${escapeHtml(s.text)}</div>
       <div class="mini-sub">Appears on ${s.triggerDate}${s.addToUrgent ? ' · goes to Urgent six' : ''}</div>`;
     const actions = document.createElement('div');
     actions.className = 'mini-actions';
+    const edit = document.createElement('button');
+    edit.className = 'btn secondary small'; edit.textContent = 'Edit';
+    edit.onclick = ()=> startEditScheduled(s.id);
     const del = document.createElement('button');
     del.className = 'btn danger small'; del.textContent = 'Delete';
     del.onclick = ()=> deleteScheduled(s.id);
+    actions.appendChild(edit);
     actions.appendChild(del);
     el.appendChild(actions);
     container.appendChild(el);
@@ -827,7 +989,7 @@ function renderScheduled(){
 function renderArchive(){
   const container = document.getElementById('archiveList');
   container.innerHTML = '';
-  const done = state.tasks.filter(t=>t.status==='completed')
+  const done = state.tasks.filter(t=>t.status==='completed' && inSpace(t))
     .sort((a,b)=> (b.completedDate||'').localeCompare(a.completedDate||''));
   if(done.length === 0){
     container.innerHTML = '<div class="empty-note">Nothing completed yet.</div>';
@@ -855,7 +1017,7 @@ function addMasterTask(){
   const text = input.value.trim();
   if(!text) return;
   state.tasks.push({
-    id: uid(), text, list:'master', status:'active',
+    id: uid(), space: currentSpace, text, list:'master', status:'active',
     order: appendOrder('master'),
     dueDate:null, completedDate:null, source:'manual', sourceId:null
   });
@@ -882,7 +1044,7 @@ function deleteTask(id){
 // Moves a task into targetList and positions it relative to beforeId (or appends
 // to the end if beforeId is null). Used by every drop target — column background,
 // urgent slots, and row-level before/after drops all funnel through here so
-// ordering stays consistent everywhere.
+// ordering stays consistent everywhere. Works within the space being viewed.
 function reorderOrMove(draggedId, targetList, beforeId, insertAfter){
   const dragged = state.tasks.find(t=>t.id===draggedId && t.status==='active');
   if(!dragged) return;
@@ -959,7 +1121,7 @@ function addRecurring(){
     return;
   }
   const rec = {
-    id: uid(), text, type,
+    id: uid(), space: currentSpace, text, type,
     intervalDays: type==='interval' ? Math.max(1, parseInt(document.getElementById('recInterval').value||'7',10)) : null,
     weekdays: type==='weekdays' ? [...selectedWeekdays] : [],
     nextDue: start,
@@ -976,6 +1138,136 @@ function addRecurring(){
 
 function deleteRecurring(id){
   state.recurring = state.recurring.filter(r=>r.id!==id);
+  editingRecurringId = null;   // any open edit form is closed so the list redraws cleanly
+  renderAll();
+  persist();
+}
+
+/* ---------- Editing a recurring task ---------- */
+// Only one recurring task can be edited at a time. Changes apply to future
+// occurrences; tasks already sitting in your lists are left as they are
+// (double-click those to rename them).
+let editingRecurringId = null;
+let editWeekdays = [];
+
+function startEditRecurring(id){
+  const r = state.recurring.find(r=>r.id===id);
+  if(!r) return;
+  editingRecurringId = id;
+  editWeekdays = r.type === 'weekdays' ? [...r.weekdays] : [];
+  renderRecurring();
+}
+
+function cancelEditRecurring(){
+  editingRecurringId = null;
+  renderRecurring();
+}
+
+function buildRecurringEditForm(r){
+  const form = document.createElement('div');
+  form.className = 'edit-form';
+  form.innerHTML = `
+    <div class="field"><label>Task description</label><input class="e-text" type="text"></div>
+    <div class="field"><label>Pattern</label>
+      <select class="e-type">
+        <option value="interval">Every N days</option>
+        <option value="weekdays">Specific weekdays</option>
+      </select>
+    </div>
+    <div class="field e-interval-field"><label>Repeat every (days)</label><input class="e-interval" type="number" min="1"></div>
+    <div class="field e-weekdays-field"><label>Days of week</label><div class="weekday-picker e-picker"></div></div>
+    <div class="field"><label>Next due date</label><input class="e-next" type="date"></div>
+    <label style="font-size:12.5px;display:flex;align-items:center;gap:5px;margin-bottom:8px;">
+      <input type="checkbox" class="e-urgent" style="width:auto;"> Add straight to Urgent six when due
+    </label>
+    <div class="mini-actions"></div>`;
+
+  // Fill values through properties (not string interpolation) so any text is safe.
+  const textInput = form.querySelector('.e-text');
+  const typeSel = form.querySelector('.e-type');
+  const intervalInput = form.querySelector('.e-interval');
+  const nextInput = form.querySelector('.e-next');
+  const urgentBox = form.querySelector('.e-urgent');
+  textInput.value = r.text;
+  typeSel.value = r.type;
+  intervalInput.value = r.intervalDays || 7;
+  nextInput.value = r.nextDue;
+  urgentBox.checked = !!r.addToUrgent;
+
+  const intervalField = form.querySelector('.e-interval-field');
+  const weekdaysField = form.querySelector('.e-weekdays-field');
+  const syncFields = ()=>{
+    intervalField.style.display = typeSel.value === 'interval' ? 'block' : 'none';
+    weekdaysField.style.display = typeSel.value === 'weekdays' ? 'block' : 'none';
+  };
+  typeSel.onchange = syncFields;
+  syncFields();
+
+  const picker = form.querySelector('.e-picker');
+  WEEKDAY_LABELS.forEach((label, idx)=>{
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = label;
+    if(editWeekdays.includes(idx)) btn.classList.add('on');
+    btn.onclick = ()=>{
+      if(editWeekdays.includes(idx)){
+        editWeekdays = editWeekdays.filter(d=>d!==idx);
+      } else {
+        editWeekdays.push(idx);
+      }
+      btn.classList.toggle('on');
+    };
+    picker.appendChild(btn);
+  });
+
+  const actions = form.querySelector('.mini-actions');
+  const save = document.createElement('button');
+  save.className = 'btn small'; save.textContent = 'Save changes';
+  save.onclick = ()=> saveRecurringEdit(r.id, form);
+  const cancel = document.createElement('button');
+  cancel.className = 'btn secondary small'; cancel.textContent = 'Cancel';
+  cancel.onclick = cancelEditRecurring;
+  actions.appendChild(save);
+  actions.appendChild(cancel);
+
+  form.onkeydown = (e)=>{
+    if(e.key === 'Escape'){ e.preventDefault(); cancelEditRecurring(); }
+    else if(e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox'){
+      e.preventDefault(); saveRecurringEdit(r.id, form);
+    }
+  };
+
+  setTimeout(()=> textInput.focus(), 0);
+  return form;
+}
+
+function saveRecurringEdit(id, form){
+  const r = state.recurring.find(r=>r.id===id);
+  if(!r) return;
+  const text = form.querySelector('.e-text').value.trim();
+  const type = form.querySelector('.e-type').value;
+  const next = form.querySelector('.e-next').value || r.nextDue;
+  const addToUrgent = form.querySelector('.e-urgent').checked;
+  if(!text){
+    alert('The task description cannot be empty.');
+    return;
+  }
+  if(type === 'weekdays' && editWeekdays.length === 0){
+    alert('Pick at least one weekday.');
+    return;
+  }
+  r.text = text;
+  r.type = type;
+  r.intervalDays = type==='interval'
+    ? Math.max(1, parseInt(form.querySelector('.e-interval').value || '7', 10))
+    : null;
+  r.weekdays = type==='weekdays' ? [...editWeekdays].sort((a,b)=>a-b) : [];
+  // For a weekday pattern, snap the next date forward to a day that actually matches it.
+  r.nextDue = type==='weekdays' ? nextWeekdayOnOrAfter(next, r.weekdays) : next;
+  r.addToUrgent = addToUrgent;
+
+  editingRecurringId = null;
+  processDueItems();
   renderAll();
   persist();
 }
@@ -985,7 +1277,7 @@ function addScheduled(){
   const date = document.getElementById('schedDate').value;
   const addToUrgent = document.getElementById('schedUrgent').checked;
   if(!text || !date) return;
-  state.scheduled.push({ id: uid(), text, triggerDate: date, addToUrgent });
+  state.scheduled.push({ id: uid(), space: currentSpace, text, triggerDate: date, addToUrgent });
   document.getElementById('schedText').value = '';
   document.getElementById('schedDate').value = '';
   processDueItems();
@@ -995,6 +1287,85 @@ function addScheduled(){
 
 function deleteScheduled(id){
   state.scheduled = state.scheduled.filter(s=>s.id!==id);
+  editingScheduledId = null;   // any open edit form is closed so the list redraws cleanly
+  renderAll();
+  persist();
+}
+
+/* ---------- Editing a scheduled task ---------- */
+// One scheduled task can be edited at a time. If you move the date to today or
+// earlier, the task fires right away (same as when creating one).
+let editingScheduledId = null;
+
+function startEditScheduled(id){
+  const s = state.scheduled.find(s=>s.id===id);
+  if(!s) return;
+  editingScheduledId = id;
+  renderScheduled();
+}
+
+function cancelEditScheduled(){
+  editingScheduledId = null;
+  renderScheduled();
+}
+
+function buildScheduledEditForm(s){
+  const form = document.createElement('div');
+  form.className = 'edit-form';
+  form.innerHTML = `
+    <div class="field"><label>Task description</label><input class="e-text" type="text"></div>
+    <div class="field"><label>Due date</label><input class="e-date" type="date"></div>
+    <label style="font-size:12.5px;display:flex;align-items:center;gap:5px;margin-bottom:8px;">
+      <input type="checkbox" class="e-urgent" style="width:auto;"> Add straight to Urgent six when due
+    </label>
+    <div class="mini-actions"></div>`;
+
+  // Fill values through properties (not string interpolation) so any text is safe.
+  const textInput = form.querySelector('.e-text');
+  textInput.value = s.text;
+  form.querySelector('.e-date').value = s.triggerDate;
+  form.querySelector('.e-urgent').checked = !!s.addToUrgent;
+
+  const actions = form.querySelector('.mini-actions');
+  const save = document.createElement('button');
+  save.className = 'btn small'; save.textContent = 'Save changes';
+  save.onclick = ()=> saveScheduledEdit(s.id, form);
+  const cancel = document.createElement('button');
+  cancel.className = 'btn secondary small'; cancel.textContent = 'Cancel';
+  cancel.onclick = cancelEditScheduled;
+  actions.appendChild(save);
+  actions.appendChild(cancel);
+
+  form.onkeydown = (e)=>{
+    if(e.key === 'Escape'){ e.preventDefault(); cancelEditScheduled(); }
+    else if(e.key === 'Enter' && e.target.tagName === 'INPUT' && e.target.type !== 'checkbox'){
+      e.preventDefault(); saveScheduledEdit(s.id, form);
+    }
+  };
+
+  setTimeout(()=> textInput.focus(), 0);
+  return form;
+}
+
+function saveScheduledEdit(id, form){
+  const s = state.scheduled.find(s=>s.id===id);
+  if(!s) return;
+  const text = form.querySelector('.e-text').value.trim();
+  const date = form.querySelector('.e-date').value;
+  if(!text){
+    alert('The task description cannot be empty.');
+    return;
+  }
+  if(!date){
+    alert('Pick a due date.');
+    return;
+  }
+  s.text = text;
+  s.triggerDate = date;
+  s.addToUrgent = form.querySelector('.e-urgent').checked;
+
+  editingScheduledId = null;
+  processDueItems();
   renderAll();
   persist();
 }
