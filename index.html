@@ -186,6 +186,26 @@
   }
 
   .form-block{ border:1px solid var(--border); border-radius:var(--radius); padding:12px; margin-bottom:16px; background:var(--surface); }
+
+  /* ---------- Completed view (third top-level tab) ---------- */
+  #completedView{ display:none; }
+  body.view-completed main.layout{ display:none; }
+  body.view-completed #completedView{ display:block; }
+  .completed-wrap{ max-width:760px; margin:0 auto; padding:28px 22px 48px; }
+  .completed-search{
+    width:100%; padding:10px 12px; margin-bottom:18px;
+    border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);
+  }
+  .completed-item{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .completed-item .completed-main{ min-width:0; }
+  .completed-item .mini-title{ text-decoration:line-through; color:var(--ink-soft); word-break:break-word; }
+  .space-tag{
+    flex-shrink:0; font-size:11.5px; padding:1px 8px; border-radius:2px;
+    border:1px solid var(--border); color:var(--ink-soft);
+  }
+  .space-tag.work{ background:#F3EFE6; }
+  .space-tag.home{ background:#E2EEF8; border-color:#B9CEE1; }
+  mark{ background:var(--brass-soft); color:var(--ink); padding:0 1px; border-radius:2px; }
   .form-block h3{ font-size:13px; margin-bottom:10px; }
   .row-2{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .weekday-picker{ display:flex; gap:4px; margin-top:4px; }
@@ -260,9 +280,10 @@
   <header class="top">
     <div class="top-left">
       <h1>Ledger</h1>
-      <nav class="space-switch" aria-label="Switch between Work and Home lists">
+      <nav class="space-switch" aria-label="Switch between Work, Home, and Completed">
         <button class="space-btn active" data-space="work" onclick="switchSpace('work')">Work</button>
         <button class="space-btn" data-space="home" onclick="switchSpace('home')">Home</button>
+        <button class="space-btn" data-space="completed" onclick="switchSpace('completed')">Completed</button>
       </nav>
     </div>
     <div class="top-actions">
@@ -299,7 +320,6 @@
       <div class="tabs">
         <button class="tab active" data-tab="recurring" onclick="switchTab('recurring')">Recurring</button>
         <button class="tab" data-tab="scheduled" onclick="switchTab('scheduled')">Scheduled</button>
-        <button class="tab" data-tab="archive" onclick="switchTab('archive')">Completed</button>
       </div>
 
       <div class="tab-panel active" id="panel-recurring">
@@ -348,12 +368,21 @@
         </div>
         <div id="scheduledList"></div>
       </div>
-
-      <div class="tab-panel" id="panel-archive">
-        <div id="archiveList"></div>
-      </div>
     </section>
   </main>
+
+  <!-- COMPLETED (all spaces, searchable) -->
+  <div id="completedView">
+    <div class="completed-wrap">
+      <div class="col-head">
+        <h2>Completed</h2>
+        <span class="count" id="completedCount">0</span>
+      </div>
+      <input id="completedSearch" class="completed-search" type="search" autocomplete="off"
+             placeholder="Search completed tasks…" aria-label="Search completed tasks" oninput="renderCompleted()">
+      <div id="completedList"></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -477,6 +506,9 @@ let state = {
 const SPACES = ['work','home'];
 const SPACE_KEY = 'ledger_space';   // which tab this device last viewed (per-browser, not synced)
 let currentSpace = 'work';
+// The Completed tab is a view across BOTH spaces, so it is tracked separately —
+// currentSpace always stays 'work' or 'home' (the last one you were in).
+let viewingCompleted = false;
 
 function uid(){ return crypto.randomUUID(); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -520,17 +552,27 @@ function loadSpacePref(){
 }
 
 function applySpaceUI(){
-  document.body.classList.toggle('space-home', currentSpace === 'home');
+  // Completed is neutral (no blue), since it mixes Work and Home.
+  document.body.classList.toggle('space-home', !viewingCompleted && currentSpace === 'home');
+  document.body.classList.toggle('view-completed', viewingCompleted);
+  const active = viewingCompleted ? 'completed' : currentSpace;
   document.querySelectorAll('.space-btn').forEach(b=>{
-    b.classList.toggle('active', b.dataset.space === currentSpace);
+    b.classList.toggle('active', b.dataset.space === active);
   });
-  document.title = 'Ledger — ' + (currentSpace === 'home' ? 'Home' : 'Work');
+  document.title = 'Ledger — ' + (viewingCompleted ? 'Completed' : currentSpace === 'home' ? 'Home' : 'Work');
 }
 
 function switchSpace(name){
-  if(!SPACES.includes(name) || name === currentSpace) return;
-  currentSpace = name;
-  try{ localStorage.setItem(SPACE_KEY, name); } catch(e){}
+  if(name === 'completed'){
+    if(viewingCompleted) return;
+    viewingCompleted = true;
+  } else {
+    if(!SPACES.includes(name)) return;
+    if(name === currentSpace && !viewingCompleted) return;
+    viewingCompleted = false;
+    currentSpace = name;
+    try{ localStorage.setItem(SPACE_KEY, name); } catch(e){}   // Completed is never remembered; devices reopen in the last Work/Home tab
+  }
   editingRecurringId = null;   // discard any half-finished recurring edit
   editingScheduledId = null;   // ...and any half-finished scheduled edit
   applySpaceUI();
@@ -748,7 +790,7 @@ function renderAll(){
   // Don't rebuild the recurring list while an edit form is open, or typed-in changes would be wiped.
   if(editingRecurringId === null) renderRecurring();
   if(editingScheduledId === null) renderScheduled();
-  renderArchive();
+  if(viewingCompleted) renderCompleted();
 }
 
 // Active tasks in the space currently being viewed.
@@ -986,19 +1028,73 @@ function renderScheduled(){
   });
 }
 
-function renderArchive(){
-  const container = document.getElementById('archiveList');
-  container.innerHTML = '';
-  const done = state.tasks.filter(t=>t.status==='completed' && inSpace(t))
+// Wraps every occurrence of any search term in <mark>. Built with DOM nodes (not
+// innerHTML) so task text can never be interpreted as markup.
+function highlightInto(el, text, terms){
+  if(terms.length === 0){ el.textContent = text; return; }
+  const escaped = terms.map(t=>t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const parts = text.split(new RegExp('(' + escaped.join('|') + ')', 'gi'));
+  parts.forEach((part, i)=>{
+    if(part === '') return;
+    if(i % 2 === 1){
+      const m = document.createElement('mark');
+      m.textContent = part;
+      el.appendChild(m);
+    } else {
+      el.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+// Completed tab: every completed task from Work AND Home, newest first.
+// Search matches the task text; several words must all appear (in any order).
+function renderCompleted(){
+  const container = document.getElementById('completedList');
+  const query = document.getElementById('completedSearch').value.trim();
+  const terms = query ? query.split(/\s+/) : [];
+  const lowerTerms = terms.map(t=>t.toLowerCase());
+
+  const all = state.tasks.filter(t=>t.status==='completed')
     .sort((a,b)=> (b.completedDate||'').localeCompare(a.completedDate||''));
-  if(done.length === 0){
+  const shown = all.filter(t=>{
+    const hay = t.text.toLowerCase();
+    return lowerTerms.every(term=>hay.includes(term));
+  });
+
+  document.getElementById('completedCount').textContent =
+    terms.length ? `${shown.length} of ${all.length}` : `${all.length}`;
+
+  container.innerHTML = '';
+  if(all.length === 0){
     container.innerHTML = '<div class="empty-note">Nothing completed yet.</div>';
+    return;
   }
-  done.forEach(t=>{
+  if(shown.length === 0){
+    container.innerHTML = '<div class="empty-note">No completed tasks match your search.</div>';
+    return;
+  }
+  shown.forEach(t=>{
+    const space = spaceOf(t);
     const el = document.createElement('div');
-    el.className = 'mini-item';
-    el.innerHTML = `<div class="mini-title" style="text-decoration:line-through;color:var(--ink-soft);">${escapeHtml(t.text)}</div>
-      <div class="mini-sub">Completed ${t.completedDate}</div>`;
+    el.className = 'mini-item completed-item';
+
+    const main = document.createElement('div');
+    main.className = 'completed-main';
+    const title = document.createElement('div');
+    title.className = 'mini-title';
+    highlightInto(title, t.text, terms);
+    const sub = document.createElement('div');
+    sub.className = 'mini-sub';
+    sub.textContent = 'Completed ' + (t.completedDate || '');
+    main.appendChild(title);
+    main.appendChild(sub);
+
+    const tag = document.createElement('span');
+    tag.className = 'space-tag ' + space;
+    tag.textContent = space === 'home' ? 'Home' : 'Work';
+
+    el.appendChild(main);
+    el.appendChild(tag);
     container.appendChild(el);
   });
 }
