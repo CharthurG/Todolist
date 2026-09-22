@@ -90,7 +90,7 @@
 
   /* Work / Home switcher */
   .space-switch{
-    display:flex; gap:2px; padding:3px;
+    display:flex; gap:2px; padding:3px; flex-wrap:wrap;
     border:1px solid var(--border); border-radius:var(--radius); background:var(--paper);
   }
   .space-btn{
@@ -189,9 +189,12 @@
 
   /* ---------- Completed view (third top-level tab) ---------- */
   #completedView{ display:none; }
-  body.view-completed main.layout{ display:none; }
+  #apprenticeshipView{ display:none; }
+  body.view-completed main.layout, body.view-apprenticeship main.layout{ display:none; }
   body.view-completed #completedView{ display:block; }
+  body.view-apprenticeship #apprenticeshipView{ display:block; }
   .completed-wrap{ max-width:760px; margin:0 auto; padding:28px 22px 48px; }
+  .appr-total{ font-size:13px; color:var(--ink-soft); margin-bottom:16px; }
   .completed-search{
     width:100%; padding:10px 12px; margin-bottom:18px;
     border:1px solid var(--border); border-radius:var(--radius); background:var(--surface);
@@ -280,10 +283,11 @@
   <header class="top">
     <div class="top-left">
       <h1>Ledger</h1>
-      <nav class="space-switch" aria-label="Switch between Work, Home, and Completed">
+      <nav class="space-switch" aria-label="Switch between Work, Home, Completed, and Apprenticeship">
         <button class="space-btn active" data-space="work" onclick="switchSpace('work')">Work</button>
         <button class="space-btn" data-space="home" onclick="switchSpace('home')">Home</button>
         <button class="space-btn" data-space="completed" onclick="switchSpace('completed')">Completed</button>
+        <button class="space-btn" data-space="apprenticeship" onclick="switchSpace('apprenticeship')">Apprenticeship</button>
       </nav>
     </div>
     <div class="top-actions">
@@ -381,6 +385,29 @@
       <input id="completedSearch" class="completed-search" type="search" autocomplete="off"
              placeholder="Search completed tasks…" aria-label="Search completed tasks" oninput="renderCompleted()">
       <div id="completedList"></div>
+    </div>
+  </div>
+
+  <!-- APPRENTICESHIP HOURS (own tab, shared across Work/Home, written to the same JSON file) -->
+  <div id="apprenticeshipView">
+    <div class="completed-wrap">
+      <div class="col-head">
+        <h2>Apprenticeship hours</h2>
+        <span class="count" id="apprenticeshipTotal">0 hrs</span>
+      </div>
+      <div class="form-block">
+        <h3>Log hours</h3>
+        <div class="row-2">
+          <div class="field"><label for="appDate">Date</label><input id="appDate" type="date"></div>
+          <div class="field"><label for="appHours">Hours</label><input id="appHours" type="number" min="0" step="0.25" placeholder="e.g. 2.5"></div>
+        </div>
+        <div class="field"><label for="appDesc">Description</label><input id="appDesc" type="text" placeholder="What you worked on"></div>
+        <button class="btn small full" onclick="addApprenticeship()">Log hours</button>
+      </div>
+      <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+        <button class="btn secondary small" onclick="exportApprenticeship()">Export as text file</button>
+      </div>
+      <div id="apprenticeshipList"></div>
     </div>
   </div>
 </div>
@@ -500,15 +527,21 @@ let state = {
   config: { passwordHash: null },
   tasks: [],       // {id, space, text, list:'master'|'urgent', status:'active'|'completed', order, dueDate, completedDate, source:'manual'|'recurring'|'scheduled', sourceId}
   recurring: [],   // {id, space, text, type:'interval'|'weekdays', intervalDays, weekdays:[], nextDue, addToUrgent}
-  scheduled: []    // {id, space, text, triggerDate, addToUrgent}
+  scheduled: [],   // {id, space, text, triggerDate, addToUrgent}
+  apprenticeship: []  // {id, date, hours, description} — not split by space; one running log
 };
+
+// Your apprenticeship program target, shown as a running total. Edit this if your
+// program's total differs.
+const APPRENTICESHIP_GOAL_HOURS = 300;
 
 const SPACES = ['work','home'];
 const SPACE_KEY = 'ledger_space';   // which tab this device last viewed (per-browser, not synced)
 let currentSpace = 'work';
-// The Completed tab is a view across BOTH spaces, so it is tracked separately —
-// currentSpace always stays 'work' or 'home' (the last one you were in).
-let viewingCompleted = false;
+// activeView is what's currently shown: 'work' | 'home' | 'completed' | 'apprenticeship'.
+// currentSpace always stays 'work' or 'home' — the last one you were in — since only
+// Completed and Apprenticeship are remembered as "not a space" and never restored on reopen.
+let activeView = 'work';
 
 function uid(){ return crypto.randomUUID(); }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
@@ -530,6 +563,7 @@ function migrateTasks(){
   state.tasks.forEach(t=>{ if(!t.space) t.space = 'work'; });
   state.recurring.forEach(r=>{ if(!r.space) r.space = 'work'; });
   state.scheduled.forEach(s=>{ if(!s.space) s.space = 'work'; });
+  if(!Array.isArray(state.apprenticeship)) state.apprenticeship = [];
 
   SPACES.forEach(space=>{
     ['master','urgent'].forEach(list=>{
@@ -549,32 +583,36 @@ function loadSpacePref(){
     const v = localStorage.getItem(SPACE_KEY);
     if(SPACES.includes(v)) currentSpace = v;
   } catch(e){}
+  activeView = currentSpace;
 }
 
 function applySpaceUI(){
-  // Completed is neutral (no blue), since it mixes Work and Home.
-  document.body.classList.toggle('space-home', !viewingCompleted && currentSpace === 'home');
-  document.body.classList.toggle('view-completed', viewingCompleted);
-  const active = viewingCompleted ? 'completed' : currentSpace;
+  // Completed and Apprenticeship are neutral (no blue) — Completed mixes Work and
+  // Home, and Apprenticeship isn't a space at all.
+  document.body.classList.toggle('space-home', activeView === 'home');
+  document.body.classList.toggle('view-completed', activeView === 'completed');
+  document.body.classList.toggle('view-apprenticeship', activeView === 'apprenticeship');
   document.querySelectorAll('.space-btn').forEach(b=>{
-    b.classList.toggle('active', b.dataset.space === active);
+    b.classList.toggle('active', b.dataset.space === activeView);
   });
-  document.title = 'Ledger — ' + (viewingCompleted ? 'Completed' : currentSpace === 'home' ? 'Home' : 'Work');
+  const titles = { work:'Work', home:'Home', completed:'Completed', apprenticeship:'Apprenticeship' };
+  document.title = 'Ledger — ' + titles[activeView];
 }
 
 function switchSpace(name){
-  if(name === 'completed'){
-    if(viewingCompleted) return;
-    viewingCompleted = true;
-  } else {
-    if(!SPACES.includes(name)) return;
-    if(name === currentSpace && !viewingCompleted) return;
-    viewingCompleted = false;
+  if(name === 'work' || name === 'home'){
+    if(activeView === name) return;
     currentSpace = name;
-    try{ localStorage.setItem(SPACE_KEY, name); } catch(e){}   // Completed is never remembered; devices reopen in the last Work/Home tab
+    try{ localStorage.setItem(SPACE_KEY, name); } catch(e){}
+  } else if(name === 'completed' || name === 'apprenticeship'){
+    if(activeView === name) return;
+  } else {
+    return;
   }
-  editingRecurringId = null;   // discard any half-finished recurring edit
-  editingScheduledId = null;   // ...and any half-finished scheduled edit
+  activeView = name;
+  editingRecurringId = null;      // discard any half-finished recurring edit
+  editingScheduledId = null;      // ...any half-finished scheduled edit
+  editingApprenticeshipId = null; // ...and any half-finished apprenticeship edit
   applySpaceUI();
   renderAll();
 }
@@ -650,7 +688,7 @@ async function boot(){
   try{
     const remote = await loadDataFromGithub();
     if(remote){
-      state = Object.assign({config:{passwordHash:null}, tasks:[], recurring:[], scheduled:[]}, remote);
+      state = Object.assign({config:{passwordHash:null}, tasks:[], recurring:[], scheduled:[], apprenticeship:[]}, remote);
     }
     migrateTasks();
     setStatus('Synced');
@@ -790,7 +828,8 @@ function renderAll(){
   // Don't rebuild the recurring list while an edit form is open, or typed-in changes would be wiped.
   if(editingRecurringId === null) renderRecurring();
   if(editingScheduledId === null) renderScheduled();
-  if(viewingCompleted) renderCompleted();
+  if(activeView === 'completed') renderCompleted();
+  if(activeView === 'apprenticeship' && editingApprenticeshipId === null) renderApprenticeship();
 }
 
 // Active tasks in the space currently being viewed.
@@ -1097,6 +1136,187 @@ function renderCompleted(){
     el.appendChild(tag);
     container.appendChild(el);
   });
+}
+
+function formatHours(n){
+  n = Math.round((Number(n)||0) * 100) / 100;   // avoid float noise like 2.1000000000000005
+  return n.toString();
+}
+
+function apprenticeshipTotalHours(){
+  return (state.apprenticeship||[]).reduce((sum,e)=> sum + (Number(e.hours)||0), 0);
+}
+
+// Apprenticeship tab: one running log, not split by Work/Home, sorted most recent first.
+function renderApprenticeship(){
+  document.getElementById('apprenticeshipTotal').textContent =
+    `${formatHours(apprenticeshipTotalHours())} / ${APPRENTICESHIP_GOAL_HOURS} hrs`;
+
+  const container = document.getElementById('apprenticeshipList');
+  container.innerHTML = '';
+  const items = (state.apprenticeship||[]).slice()
+    .sort((a,b)=> b.date.localeCompare(a.date) || (b.id||'').localeCompare(a.id||''));
+
+  if(items.length === 0){
+    container.innerHTML = '<div class="empty-note">No hours logged yet.</div>';
+    return;
+  }
+  items.forEach(entry=>{
+    if(entry.id === editingApprenticeshipId){
+      container.appendChild(buildApprenticeshipEditForm(entry));
+      return;
+    }
+    const el = document.createElement('div');
+    el.className = 'mini-item completed-item';
+    el.title = 'Double-click to edit';
+
+    const main = document.createElement('div');
+    main.className = 'completed-main';
+    const title = document.createElement('div');
+    title.className = 'mini-title';
+    title.style.textDecoration = 'none';
+    title.style.color = 'var(--ink)';
+    title.textContent = `${entry.date} — ${formatHours(entry.hours)} hrs`;
+    const sub = document.createElement('div');
+    sub.className = 'mini-sub';
+    sub.textContent = entry.description || '(no description)';
+    main.appendChild(title);
+    main.appendChild(sub);
+
+    const del = document.createElement('button');
+    del.className = 'icon-btn'; del.title = 'Delete'; del.textContent = '✕';
+    del.onclick = (e)=>{ e.stopPropagation(); deleteApprenticeship(entry.id); };
+
+    el.appendChild(main);
+    el.appendChild(del);
+    el.ondblclick = (e)=>{
+      if(e.target === del) return;
+      startEditApprenticeship(entry.id);
+    };
+    container.appendChild(el);
+  });
+}
+
+function addApprenticeship(){
+  const date = document.getElementById('appDate').value || todayISO();
+  const hoursRaw = document.getElementById('appHours').value;
+  const hours = parseFloat(hoursRaw);
+  const description = document.getElementById('appDesc').value.trim();
+  if(!hoursRaw || isNaN(hours) || hours <= 0){
+    alert('Enter the number of hours (greater than zero).');
+    return;
+  }
+  state.apprenticeship = state.apprenticeship || [];
+  state.apprenticeship.push({ id: uid(), date, hours, description });
+  document.getElementById('appHours').value = '';
+  document.getElementById('appDesc').value = '';
+  renderAll();
+  persist();
+}
+
+function deleteApprenticeship(id){
+  state.apprenticeship = (state.apprenticeship||[]).filter(e=>e.id!==id);
+  if(editingApprenticeshipId === id) editingApprenticeshipId = null;
+  renderAll();
+  persist();
+}
+
+/* ---------- Editing an apprenticeship entry (double-click) ---------- */
+let editingApprenticeshipId = null;
+
+function startEditApprenticeship(id){
+  const e = (state.apprenticeship||[]).find(e=>e.id===id);
+  if(!e) return;
+  editingApprenticeshipId = id;
+  renderApprenticeship();
+}
+
+function cancelEditApprenticeship(){
+  editingApprenticeshipId = null;
+  renderApprenticeship();
+}
+
+function buildApprenticeshipEditForm(entry){
+  const form = document.createElement('div');
+  form.className = 'edit-form';
+  form.innerHTML = `
+    <div class="row-2">
+      <div class="field"><label>Date</label><input class="e-date" type="date"></div>
+      <div class="field"><label>Hours</label><input class="e-hours" type="number" min="0" step="0.25"></div>
+    </div>
+    <div class="field"><label>Description</label><input class="e-desc" type="text"></div>
+    <div class="mini-actions"></div>`;
+
+  // Fill values through properties (not string interpolation) so any text is safe.
+  const dateInput = form.querySelector('.e-date');
+  const hoursInput = form.querySelector('.e-hours');
+  const descInput = form.querySelector('.e-desc');
+  dateInput.value = entry.date;
+  hoursInput.value = entry.hours;
+  descInput.value = entry.description || '';
+
+  const actions = form.querySelector('.mini-actions');
+  const save = document.createElement('button');
+  save.className = 'btn small'; save.textContent = 'Save changes';
+  save.onclick = ()=> saveApprenticeshipEdit(entry.id, form);
+  const cancel = document.createElement('button');
+  cancel.className = 'btn secondary small'; cancel.textContent = 'Cancel';
+  cancel.onclick = cancelEditApprenticeship;
+  actions.appendChild(save);
+  actions.appendChild(cancel);
+
+  form.onkeydown = (e)=>{
+    if(e.key === 'Escape'){ e.preventDefault(); cancelEditApprenticeship(); }
+    else if(e.key === 'Enter' && e.target.tagName === 'INPUT'){
+      e.preventDefault(); saveApprenticeshipEdit(entry.id, form);
+    }
+  };
+
+  setTimeout(()=> dateInput.focus(), 0);
+  return form;
+}
+
+function saveApprenticeshipEdit(id, form){
+  const entry = (state.apprenticeship||[]).find(e=>e.id===id);
+  if(!entry) return;
+  const date = form.querySelector('.e-date').value;
+  const hours = parseFloat(form.querySelector('.e-hours').value);
+  const description = form.querySelector('.e-desc').value.trim();
+  if(!date){ alert('Pick a date.'); return; }
+  if(isNaN(hours) || hours <= 0){ alert('Enter the number of hours (greater than zero).'); return; }
+  entry.date = date;
+  entry.hours = hours;
+  entry.description = description;
+  editingApprenticeshipId = null;
+  renderAll();
+  persist();
+}
+
+// Exports the current log as a plain-text file via a browser download — nothing
+// is sent anywhere, this just saves a .txt built from your own data.
+function exportApprenticeship(){
+  const items = (state.apprenticeship||[]).slice()
+    .sort((a,b)=> a.date.localeCompare(b.date) || (a.id||'').localeCompare(b.id||''));
+  const lines = ['Apprenticeship hours', `Exported ${todayISO()}`, ''];
+  if(items.length === 0){
+    lines.push('(no hours logged yet)');
+  } else {
+    items.forEach(e=>{
+      lines.push(`${e.date}\t${formatHours(e.hours)} hrs\t${e.description || ''}`);
+    });
+  }
+  lines.push('');
+  lines.push(`Total: ${formatHours(apprenticeshipTotalHours())} hrs (goal: ${APPRENTICESHIP_GOAL_HOURS} hrs)`);
+
+  const blob = new Blob([lines.join('\n')], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `apprenticeship-hours-${todayISO()}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function escapeHtml(str){
